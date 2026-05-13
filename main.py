@@ -225,8 +225,13 @@ def run_sp_monitor(session) -> tuple[bool, list, list]:
 # ------------------------------------------------------------------
 # Мониторинг ГОСТов (публичные обсуждения)
 # ------------------------------------------------------------------
-def run_gost_monitor(session) -> tuple[bool, list, list]:
+def run_gost_monitor(session, full_backfill: bool = False) -> tuple[bool, list, list]:
     """Проверяет новые уведомления о публичных обсуждениях ГОСТов.
+
+    Args:
+        session: HTTP-сессия
+        full_backfill: Если True — загружает ВСЕ записи за 2026 год
+                       по всем статусам (backfill), а не только последние страницы.
 
     Возвращает (ошибка, свежие_для_email, все_уведомления).
     Email НЕ отправляется — только сбор данных.
@@ -236,7 +241,7 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
     seen_ids = load_cache(GOST_LAST_SEEN_PATH)
     logger.info(f"Ранее обработано уведомлений ГОСТ: {len(seen_ids)}")
 
-    notifications = fetch_gost_notifications(session)
+    notifications = fetch_gost_notifications(session, full_backfill=full_backfill)
 
     if not notifications:
         logger.warning("Не удалось получить уведомления ГОСТ с ФГИС.")
@@ -273,7 +278,7 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
         logger.info(f"Найдено {len(polymer_gost)} полимерных ГОСТов → Excel")
         update_gost_excel(polymer_gost)
 
-    # Сохраняем ВСЕ ID с последних страниц (не только новые)
+    # Сохраняем ВСЕ ID (не только новые)
     all_ids = {n["id"] for n in notifications if n.get("id")}
     save_cache(GOST_LAST_SEEN_PATH, seen_ids | all_ids)
 
@@ -283,7 +288,7 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
 # ------------------------------------------------------------------
 # Главная функция
 # ------------------------------------------------------------------
-def main() -> int:
+def main(full_backfill: bool = False) -> int:
     logger.info("=== Начало проверки уведомлений Росстандарта ===")
 
     # 0) Синхронизируем кэши с реестром дашборда (защита от повторных email)
@@ -293,7 +298,7 @@ def main() -> int:
 
     # 1) Сбор данных
     sp_error, sp_fresh, sp_all = run_sp_monitor(session)
-    gost_error, gost_fresh, gost_all = run_gost_monitor(session)
+    gost_error, gost_fresh, gost_all = run_gost_monitor(session, full_backfill=full_backfill)
 
     # 2) Обновляем реестр дашборда, генерируем HTML и делаем скриншот
     screenshot_path = None
@@ -323,4 +328,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import argparse
+    parser = argparse.ArgumentParser(description="Мониторинг уведомлений Росстандарта")
+    parser.add_argument(
+        "--full-backfill",
+        action="store_true",
+        help="Загрузить ВСЕ записи за 2026 год по всем статусам (backfill)",
+    )
+    args = parser.parse_args()
+    sys.exit(main(full_backfill=args.full_backfill))

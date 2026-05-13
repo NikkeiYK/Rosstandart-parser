@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import html
 import logging
+import time
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -81,11 +83,19 @@ def _extract_prns_code(prns_html: str) -> str:
 
 def fetch_gost_notifications(
     session: Optional[requests.Session] = None,
+    full_backfill: bool = False,
 ) -> list:
-    """Получает последние уведомления о ГОСТах со статусом «Вынесен на публичное обсуждение».
+    """Получает уведомления о ГОСТах.
 
-    Стратегия: сначала узнаём общее количество страниц,
-    затем загружаем последние N страниц (самые свежие записи).
+    Args:
+        session: HTTP-сессия
+        full_backfill: Если True — загружает ВСЕ записи за 2026 год
+                       по всем статусам (как backfill_2026.py).
+                       Если False — загружает последние N страниц
+                       только со статусом "Вынесен на публичное обсуждение".
+
+    Returns:
+        Список уведомлений
     """
     if session is None:
         session = requests.Session()
@@ -93,6 +103,9 @@ def fetch_gost_notifications(
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         })
+
+    if full_backfill:
+        return _fetch_gost_full_backfill(session)
 
     # 1) Узнаём total pages — с автопереключением IP при ошибке
     global _active_ip_index
@@ -173,6 +186,84 @@ def fetch_gost_notifications(
 
     logger.info(f"ГОСТ: получено {len(all_notifications)} уведомлений с последних страниц")
     return all_notifications
+
+
+def _fetch_gost_full_backfill(session: requests.Session) -> list:
+    """Загружает ВСЕ ГОСТ-уведомления за 2026 год по всем статусам.
+
+    Аналогично backfill_2026.py, но возвращает список вместо сохранения в реестр.
+    """
+    from src.dashboard_config import ALL_GOST_STATUSES
+
+    all_records = []
+    today = datetime.now().strftime("%Y-%m-%d")
+    date_from = "2026-01-01"
+    batch_size = 20
+    request_delay = 0.5
+
+    for status in ALL_GOST_STATUSES:
+        logger.info(f"--- Статус: {status} ---")
+
+        # Узнаём количество страниц
+        params = {
+            **_EMPTY_FILTERS,
+            "submittedPublicDiscussionDate": date_from,
+            "statusDocumentNDS": status,
+            "page": 1,
+            "rows": batch_size,
+        }
+
+        try:
+            resp = session.get(GOST_API_URL, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"Ошибка запроса API для статуса '{status}': {e}")
+            continue
+
+        total_pages_raw = data.get("total", "0")
+        total_pages = int(
+            str(total_pages_raw).replace(" ", "").replace("\xa0", "")
+        )
+        total_records = data.get("records", "0")
+        logger.info(f"Найдено: {total_records} записей на {total_pages} стр.")
+
+        if total_pages == 0:
+            continue
+
+        # Обрабатываем первую страницу
+        for row in data.get("rows", []):
+            notification = _parse_api_row(row)
+            if notification:
+                notification["fetched_date"] = today
+                notification["source"] = "gost"
+                all_records.append(notification)
+
+        # Загружаем остальные страницы
+        for page_num in range(2, total_pages + 1):
+            if page_num % 10 == 0 or page_num == total_pages:
+                logger.info(f"  Страница {page_num}/{total_pages}...")
+
+            time.sleep(request_delay)
+            params["page"] = page_num
+
+            try:
+                resp = session.get(GOST_API_URL, params=params, timeout=30)
+                resp.raise_for_status()
+                page_data = resp.json()
+            except (requests.RequestException, ValueError) as e:
+                logger.error(f"  Ошибка загрузки стр. {page_num}: {e}")
+                continue
+
+            for row in page_data.get("rows", []):
+                notification = _parse_api_row(row)
+                if notification:
+                    notification["fetched_date"] = today
+                    notification["source"] = "gost"
+                    all_records.append(notification)
+
+    logger.info(f"Всего загружено (full backfill): {len(all_records)} записей")
+    return all_records
 
 
 def _parse_api_row(row: dict) -> Optional[dict]:

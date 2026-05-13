@@ -11,3 +11,6 @@ run:
   command: python web_app.py
   containerPort: 8000
   persistenceMount: /data
+  env:
+    - name: DATA_DIR
+      value: /data

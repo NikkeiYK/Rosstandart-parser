@@ -10,3 +10,6 @@ build:
 run:
   scriptName: main.py
   persistenceMount: /data
+  env:
+    - name: DATA_DIR
+      value: /data

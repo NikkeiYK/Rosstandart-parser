@@ -1,14 +1,60 @@
-__pycache__/
+```
+# Compiled and build artifacts
 *.pyc
-*.pyo
-.env
+__pycache__/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.class
+*.out
+
+# Dependencies
 .venv/
 venv/
-*.egg-info/
-dist/
-build/
-.idea/
-.vscode/
+.env
+.env.local
+.env.*
+
+# Logs and temp files
+*.log
+*.tmp
 *.swp
 *.swo
+
+# Editors
+.vscode/
+.idea/
+
+# Build and distribution
+dist/
+build/
+target/
+*.tar
+*.gz
+*.zip
+*.rar
+*.7z
+*.bz2
+*.xz
+*.tgz
+*.Z
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# OS generated files
 .DS_Store
+Thumbs.db
+
+# Cache directories
+.mypy_cache/
+.pytest_cache/
+.gradle/
+julia-*/
+zig*/
+node_modules/
+```
