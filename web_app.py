@@ -228,8 +228,9 @@ def run_now():
         return redirect(url_for("dashboard"))
 
     try:
+        # Запускаем с флагом --full-backfill для полной загрузки за 2026 год
         result = subprocess.run(
-            [sys.executable, MAIN_PATH],
+            [sys.executable, MAIN_PATH, "--full-backfill"],
             cwd=os.path.dirname(MAIN_PATH),
             capture_output=True,
             text=True,
