@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 from collections import Counter
 from datetime import datetime
@@ -22,6 +23,22 @@ from src.dashboard_config import (
 from src.excel_writer import read_polymer_gost_stats, _migrate_gost_add_comment_column, GOST_EXCEL_PATH
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_tk_config_exists() -> None:
+    if os.path.exists(TK_CONFIG_PATH):
+        return
+    fallback = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "data", "my_technical_committees.json")
+    )
+    if not os.path.exists(fallback):
+        return
+    os.makedirs(os.path.dirname(TK_CONFIG_PATH), exist_ok=True)
+    try:
+        shutil.copyfile(fallback, TK_CONFIG_PATH)
+        logger.info(f"Скопирован конфиг ТК: {TK_CONFIG_PATH}")
+    except OSError:
+        return
 
 
 # ------------------------------------------------------------------
@@ -45,12 +62,18 @@ def _save_json(path: str, data: dict) -> None:
 def update_registry(
     gost_notifications: list[dict],
     sp_notifications: list[dict],
+    *,
+    backfill: bool = False,
 ) -> None:
-    """Добавляет новые уведомления в реестр дашборда (дедупликация по ID)."""
     registry = _load_json(DASHBOARD_REGISTRY_PATH)
     if not registry:
         registry = {
-            "metadata": {"last_updated": "", "gost_count": 0, "sp_count": 0},
+            "metadata": {
+                "last_updated": "",
+                "gost_count": 0,
+                "sp_count": 0,
+                "last_backfill": "",
+            },
             "gost": [],
             "sp": [],
         }
@@ -58,15 +81,46 @@ def update_registry(
     today = datetime.now().strftime("%Y-%m-%d")
 
     # ГОСТы
-    existing_gost_ids = {r["id"] for r in registry.get("gost", [])}
+    existing_gost_by_id = {
+        r["id"]: r for r in registry.get("gost", []) if r.get("id")
+    }
     new_gost = 0
+    updated_gost = 0
     for n in gost_notifications:
         nid = n.get("id")
-        if nid and nid not in existing_gost_ids:
+        if not nid:
+            continue
+        if nid not in existing_gost_by_id:
             entry = {**n, "fetched_date": today, "source": "gost"}
             registry["gost"].append(entry)
-            existing_gost_ids.add(nid)
+            existing_gost_by_id[nid] = entry
             new_gost += 1
+            continue
+
+        existing = existing_gost_by_id[nid]
+        changed = False
+        for k in (
+            "status",
+            "end_date",
+            "technical_committee",
+            "developer",
+            "doc_type",
+            "project_name",
+            "program",
+            "prns_code",
+            "start_date",
+            "url",
+        ):
+            if k not in n:
+                continue
+            val = n.get(k)
+            if val is None or val == "":
+                continue
+            if existing.get(k) != val:
+                existing[k] = val
+                changed = True
+        if changed:
+            updated_gost += 1
 
     # СП
     existing_sp_ids = {r["id"] for r in registry.get("sp", [])}
@@ -80,15 +134,18 @@ def update_registry(
             new_sp += 1
 
     # Метаданные
-    registry["metadata"]["last_updated"] = datetime.now().isoformat()
+    now = datetime.now().isoformat()
+    registry["metadata"]["last_updated"] = now
     registry["metadata"]["gost_count"] = len(registry["gost"])
     registry["metadata"]["sp_count"] = len(registry["sp"])
+    if backfill:
+        registry["metadata"]["last_backfill"] = now
 
     _save_json(DASHBOARD_REGISTRY_PATH, registry)
 
-    if new_gost or new_sp:
+    if new_gost or updated_gost or new_sp:
         logger.info(
-            f"Реестр дашборда: +{new_gost} ГОСТов, +{new_sp} СП "
+            f"Реестр дашборда: +{new_gost} ГОСТов, ~{updated_gost} обновлено, +{new_sp} СП "
             f"(всего: {registry['metadata']['gost_count']} ГОСТов, "
             f"{registry['metadata']['sp_count']} СП)"
         )
@@ -211,6 +268,7 @@ def generate_dashboard() -> None:
         "sp": sp_2026,
     }
 
+    ensure_tk_config_exists()
     tk_config = _load_json(TK_CONFIG_PATH)
     my_tks = tk_config.get("committees", [])
     stats = _compute_stats(filtered_registry)

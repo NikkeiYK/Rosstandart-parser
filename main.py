@@ -33,17 +33,30 @@ from src.scraper import (
     determine_stakeholders,
     _create_session,
 )
-from src.gost_scraper import fetch_gost_notifications
+from src.gost_scraper import (
+    fetch_gost_notifications_multi_status,
+    backfill_gost_notifications,
+)
 from src.polymer_filter import is_polymer_related, get_matched_keywords
 from src.excel_writer import update_sp_excel, update_gost_excel
 from src.dashboard_generator import update_registry, generate_dashboard, capture_dashboard_screenshot
-from src.dashboard_config import DASHBOARD_REGISTRY_PATH
+from src.dashboard_config import DASHBOARD_REGISTRY_PATH, ALL_GOST_STATUSES, YEAR_START
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _to_iso_date(date_str: str) -> str:
+    try:
+        return datetime.strptime(date_str.strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return "2026-01-01"
+
+
+_GOST_DATE_FROM_ISO = _to_iso_date(YEAR_START)
 
 
 # ------------------------------------------------------------------
@@ -236,7 +249,11 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
     seen_ids = load_cache(GOST_LAST_SEEN_PATH)
     logger.info(f"Ранее обработано уведомлений ГОСТ: {len(seen_ids)}")
 
-    notifications = fetch_gost_notifications(session)
+    notifications = fetch_gost_notifications_multi_status(
+        ALL_GOST_STATUSES,
+        session=session,
+        date_from=_GOST_DATE_FROM_ISO,
+    )
 
     if not notifications:
         logger.warning("Не удалось получить уведомления ГОСТ с ФГИС.")
@@ -286,10 +303,29 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
 def main() -> int:
     logger.info("=== Начало проверки уведомлений Росстандарта ===")
 
-    # 0) Синхронизируем кэши с реестром дашборда (защита от повторных email)
-    sync_caches_with_registry()
-
     session = _create_session()
+
+    if os.environ.get("AUTO_BACKFILL", "1") != "0":
+        registry = None
+        if os.path.exists(DASHBOARD_REGISTRY_PATH):
+            try:
+                with open(DASHBOARD_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                    registry = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                registry = None
+
+        last_backfill = (registry or {}).get("metadata", {}).get("last_backfill", "")
+        if not last_backfill:
+            logger.info("ГОСТ: начальная загрузка (backfill) 2026...")
+            records = backfill_gost_notifications(
+                session,
+                statuses=ALL_GOST_STATUSES,
+                date_from=_GOST_DATE_FROM_ISO,
+            )
+            if records:
+                update_registry(records, [], backfill=True)
+
+    sync_caches_with_registry()
 
     # 1) Сбор данных
     sp_error, sp_fresh, sp_all = run_sp_monitor(session)

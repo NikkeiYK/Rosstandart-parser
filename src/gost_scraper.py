@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import html
 import logging
+import time
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -64,10 +66,30 @@ _EMPTY_FILTERS = {
 }
 
 
+def _request_json(
+    session: requests.Session,
+    params: dict,
+    *,
+    timeout: int = 30,
+) -> Optional[dict]:
+    global _active_ip_index
+    while True:
+        try:
+            resp = session.get(GOST_API_URL, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
+            ip = GOST_API_IPS[_active_ip_index] if _active_ip_index < len(GOST_API_IPS) else ""
+            logger.error(f"Ошибка запроса API ФГИС ({ip}): {e}")
+            if not _switch_to_next_ip():
+                logger.error("Все IP-адреса ФГИС недоступны.")
+                return None
+
+
+
 def _extract_uuid(prns_html: str) -> Optional[str]:
     """Извлекает UUID из HTML-ссылки в поле @rsprsPrns:prns.
 
-    Пример: <a target='_blank' href='../rsprs/nds-details?uuid=6e7717ef-...'>1.13.465-1.164.19</a>
     """
     match = re.search(r"uuid=([a-f0-9\-]{36})", prns_html)
     return match.group(1) if match else None
@@ -81,8 +103,12 @@ def _extract_prns_code(prns_html: str) -> str:
 
 def fetch_gost_notifications(
     session: Optional[requests.Session] = None,
+    *,
+    status: str = GOST_STATUS_FILTER,
+    pages_from_end: int = GOST_PAGES_FROM_END,
+    date_from: Optional[str] = None,
 ) -> list:
-    """Получает последние уведомления о ГОСТах со статусом «Вынесен на публичное обсуждение».
+    """Получает последние уведомления о ГОСТах для заданного статуса.
 
     Стратегия: сначала узнаём общее количество страниц,
     затем загружаем последние N страниц (самые свежие записи).
@@ -98,29 +124,17 @@ def fetch_gost_notifications(
     global _active_ip_index
     _active_ip_index = 0  # сброс на начало при каждом запуске
 
-    data = None
-    while True:
-        try:
-            resp = session.get(
-                GOST_API_URL,
-                params={
-                    **_EMPTY_FILTERS,
-                    "statusDocumentNDS": GOST_STATUS_FILTER,
-                    "page": 1,
-                    "rows": 20,
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            break
-        except (requests.RequestException, ValueError) as e:
-            logger.error(f"Ошибка запроса API ФГИС ({GOST_API_IPS[_active_ip_index]}): {e}")
-            if not _switch_to_next_ip():
-                logger.error("Все IP-адреса ФГИС недоступны.")
-                return []
+    params = {
+        **_EMPTY_FILTERS,
+        "statusDocumentNDS": status,
+        "page": 1,
+        "rows": 20,
+    }
+    if date_from:
+        params["submittedPublicDiscussionDate"] = date_from
 
-    if data is None:
+    data = _request_json(session, params)
+    if not data:
         return []
 
     total_pages_raw = data.get("total", "0")
@@ -129,7 +143,7 @@ def fetch_gost_notifications(
     total_records = data.get("records", "0")
     logger.info(
         f"ГОСТ: всего {total_records} записей на {total_pages} страницах "
-        f"(статус: {GOST_STATUS_FILTER})"
+        f"(статус: {status})"
     )
 
     if total_pages == 0:
@@ -139,7 +153,7 @@ def fetch_gost_notifications(
     all_notifications = []
     # Первая страница уже загружена — если это последняя, используем её
     pages_to_fetch = []
-    for i in range(GOST_PAGES_FROM_END):
+    for i in range(pages_from_end):
         page_num = total_pages - i
         if page_num >= 1:
             pages_to_fetch.append(page_num)
@@ -148,21 +162,9 @@ def fetch_gost_notifications(
     # Но для упрощения — загружаем нужные страницы заново
     for page_num in sorted(pages_to_fetch):
         logger.info(f"ГОСТ: загрузка страницы {page_num}/{total_pages}...")
-        try:
-            resp = session.get(
-                GOST_API_URL,
-                params={
-                    **_EMPTY_FILTERS,
-                    "statusDocumentNDS": GOST_STATUS_FILTER,
-                    "page": page_num,
-                    "rows": 20,
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            page_data = resp.json()
-        except (requests.RequestException, ValueError) as e:
-            logger.error(f"Ошибка загрузки страницы {page_num}: {e}")
+        params["page"] = page_num
+        page_data = _request_json(session, params)
+        if not page_data:
             continue
 
         rows = page_data.get("rows", [])
@@ -173,6 +175,90 @@ def fetch_gost_notifications(
 
     logger.info(f"ГОСТ: получено {len(all_notifications)} уведомлений с последних страниц")
     return all_notifications
+
+
+def fetch_gost_notifications_multi_status(
+    statuses: list[str],
+    session: Optional[requests.Session] = None,
+    *,
+    pages_from_end: int = GOST_PAGES_FROM_END,
+    date_from: Optional[str] = None,
+) -> list[dict]:
+    if session is None:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        })
+
+    combined: dict[str, dict] = {}
+    for status in statuses:
+        items = fetch_gost_notifications(
+            session,
+            status=status,
+            pages_from_end=pages_from_end,
+            date_from=date_from,
+        )
+        for item in items:
+            gid = item.get("id")
+            if gid:
+                combined[gid] = item
+    return list(combined.values())
+
+
+def backfill_gost_notifications(
+    session: requests.Session,
+    *,
+    statuses: list[str],
+    date_from: str,
+    batch_size: int = 20,
+    request_delay_seconds: float = 0.3,
+) -> list[dict]:
+    today = datetime.now().strftime("%Y-%m-%d")
+    all_records: list[dict] = []
+
+    for status in statuses:
+        global _active_ip_index
+        _active_ip_index = 0
+
+        params = {
+            **_EMPTY_FILTERS,
+            "submittedPublicDiscussionDate": date_from,
+            "statusDocumentNDS": status,
+            "page": 1,
+            "rows": batch_size,
+        }
+        data = _request_json(session, params)
+        if not data:
+            continue
+
+        total_pages_raw = data.get("total", "0")
+        total_pages = int(str(total_pages_raw).replace(" ", "").replace("\xa0", ""))
+        total_records = data.get("records", "0")
+        logger.info(f"ГОСТ backfill: статус='{status}', записей={total_records}, страниц={total_pages}")
+
+        for row in data.get("rows", []):
+            notification = _parse_api_row(row)
+            if notification:
+                notification["fetched_date"] = today
+                notification["source"] = "gost"
+                all_records.append(notification)
+
+        for page_num in range(2, total_pages + 1):
+            time.sleep(request_delay_seconds)
+            params["page"] = page_num
+            page_data = _request_json(session, params)
+            if not page_data:
+                continue
+            for row in page_data.get("rows", []):
+                notification = _parse_api_row(row)
+                if notification:
+                    notification["fetched_date"] = today
+                    notification["source"] = "gost"
+                    all_records.append(notification)
+
+    logger.info(f"ГОСТ backfill: всего загружено {len(all_records)} записей")
+    return all_records
 
 
 def _parse_api_row(row: dict) -> Optional[dict]:
