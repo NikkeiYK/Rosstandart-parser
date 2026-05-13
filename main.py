@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -283,7 +284,14 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
 # ------------------------------------------------------------------
 # Главная функция
 # ------------------------------------------------------------------
-def main() -> int:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--gost-backfill-year", type=int, default=None)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     logger.info("=== Начало проверки уведомлений Росстандарта ===")
 
     # 0) Синхронизируем кэши с реестром дашборда (защита от повторных email)
@@ -293,12 +301,27 @@ def main() -> int:
 
     # 1) Сбор данных
     sp_error, sp_fresh, sp_all = run_sp_monitor(session)
-    gost_error, gost_fresh, gost_all = run_gost_monitor(session)
+    gost_fresh = []
+    gost_all = []
+    if args.gost_backfill_year is not None:
+        if args.gost_backfill_year != 2026:
+            logger.error("Поддерживается только backfill за 2026 год.")
+            gost_error = True
+        else:
+            import backfill_2026
+
+            gost_error = backfill_2026.backfill() != 0
+            sync_caches_with_registry()
+    else:
+        gost_error, gost_fresh, gost_all = run_gost_monitor(session)
 
     # 2) Обновляем реестр дашборда, генерируем HTML и делаем скриншот
     screenshot_path = None
     try:
-        update_registry(gost_all, sp_all)
+        if args.gost_backfill_year is not None:
+            update_registry([], sp_all)
+        else:
+            update_registry(gost_all, sp_all)
         generate_dashboard()
         screenshot_path = capture_dashboard_screenshot()
     except Exception as e:
@@ -323,4 +346,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

@@ -47,7 +47,7 @@ APP_PORT = int(os.environ.get("PORT", "8000"))
 APP_HOST = os.environ.get("APP_HOST", "0.0.0.0")
 DASHBOARD_PATH = DASHBOARD_OUTPUT_PATH
 MAIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
-RUN_TIMEOUT_SECONDS = int(os.environ.get("RUN_NOW_TIMEOUT_SECONDS", "600"))
+RUN_TIMEOUT_SECONDS = int(os.environ.get("RUN_NOW_TIMEOUT_SECONDS", "3600"))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET_KEY
@@ -229,7 +229,7 @@ def run_now():
 
     try:
         result = subprocess.run(
-            [sys.executable, MAIN_PATH],
+            [sys.executable, MAIN_PATH, "--gost-backfill-year", "2026"],
             cwd=os.path.dirname(MAIN_PATH),
             capture_output=True,
             text=True,
