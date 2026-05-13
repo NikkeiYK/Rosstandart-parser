@@ -42,6 +42,19 @@ def _save_json(path: str, data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _dedupe_entries(items: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for it in items:
+        iid = it.get("id")
+        if not iid or iid in seen:
+            continue
+        seen.add(iid)
+        out.append(it)
+    return out
+
+
+
 def update_registry(
     gost_notifications: list[dict],
     sp_notifications: list[dict],
@@ -56,6 +69,9 @@ def update_registry(
         }
 
     today = datetime.now().strftime("%Y-%m-%d")
+
+    registry["gost"] = _dedupe_entries(registry.get("gost", []))
+    registry["sp"] = _dedupe_entries(registry.get("sp", []))
 
     # ГОСТы
     existing_gost_ids = {r["id"] for r in registry.get("gost", [])}

@@ -243,7 +243,10 @@ def run_now():
         flash(f"Ошибка запуска обновления: {exc}", "error")
         return redirect(url_for("dashboard"))
 
-    if result.returncode == 0:
+    combined_out = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode == 0 and "RUN_LOCKED" in combined_out:
+        flash("Обновление уже выполняется в другом процессе. Попробуйте позже.", "error")
+    elif result.returncode == 0:
         flash("Данные успешно обновлены. Дашборд перезагружен.", "success")
     else:
         stderr = (result.stderr or "").strip()

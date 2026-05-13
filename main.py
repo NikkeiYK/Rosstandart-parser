@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -37,13 +38,36 @@ from src.gost_scraper import fetch_gost_notifications
 from src.polymer_filter import is_polymer_related, get_matched_keywords
 from src.excel_writer import update_sp_excel, update_gost_excel
 from src.dashboard_generator import update_registry, generate_dashboard, capture_dashboard_screenshot
-from src.dashboard_config import DASHBOARD_REGISTRY_PATH
+from src.dashboard_config import DASHBOARD_REGISTRY_PATH, DATA_DIR
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _try_acquire_update_lock() -> object | None:
+    lock_path = os.path.join(DATA_DIR, ".update.lock")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    f = open(lock_path, "w", encoding="utf-8")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        return None
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
+
+
+def _release_update_lock(lock_file: object | None) -> None:
+    if not lock_file:
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
 
 
 # ------------------------------------------------------------------
@@ -284,42 +308,51 @@ def run_gost_monitor(session) -> tuple[bool, list, list]:
 # Главная функция
 # ------------------------------------------------------------------
 def main() -> int:
-    logger.info("=== Начало проверки уведомлений Росстандарта ===")
-
-    # 0) Синхронизируем кэши с реестром дашборда (защита от повторных email)
-    sync_caches_with_registry()
-
-    session = _create_session()
-
-    # 1) Сбор данных
-    sp_error, sp_fresh, sp_all = run_sp_monitor(session)
-    gost_error, gost_fresh, gost_all = run_gost_monitor(session)
-
-    # 2) Обновляем реестр дашборда, генерируем HTML и делаем скриншот
-    screenshot_path = None
-    try:
-        update_registry(gost_all, sp_all)
-        generate_dashboard()
-        screenshot_path = capture_dashboard_screenshot()
-    except Exception as e:
-        logger.error(f"Ошибка обновления дашборда: {e}")
-
-    if sp_fresh or gost_fresh:
-        logger.info(
-            "Сбор завершен: свежие уведомления СП=%s, ГОСТ=%s",
-            len(sp_fresh),
-            len(gost_fresh),
-        )
-    else:
-        logger.info("Новых уведомлений не найдено.")
-
-    has_errors = sp_error or gost_error
-    if not has_errors:
-        logger.info("=== Проверка завершена успешно ===")
+    lock_file = _try_acquire_update_lock()
+    if not lock_file:
+        print("RUN_LOCKED")
+        logger.warning("Обновление уже выполняется в другом процессе — пропуск запуска.")
         return 0
-    else:
-        logger.error("=== Проверка завершена с ошибками ===")
-        return 1
+
+    try:
+        logger.info("=== Начало проверки уведомлений Росстандарта ===")
+
+        # 0) Синхронизируем кэши с реестром дашборда (защита от повторных email)
+        sync_caches_with_registry()
+
+        session = _create_session()
+
+        # 1) Сбор данных
+        sp_error, sp_fresh, sp_all = run_sp_monitor(session)
+        gost_error, gost_fresh, gost_all = run_gost_monitor(session)
+
+        # 2) Обновляем реестр дашборда, генерируем HTML и делаем скриншот
+        screenshot_path = None
+        try:
+            update_registry(gost_all, sp_all)
+            generate_dashboard()
+            screenshot_path = capture_dashboard_screenshot()
+        except Exception as e:
+            logger.error(f"Ошибка обновления дашборда: {e}")
+
+        if sp_fresh or gost_fresh:
+            logger.info(
+                "Сбор завершен: свежие уведомления СП=%s, ГОСТ=%s",
+                len(sp_fresh),
+                len(gost_fresh),
+            )
+        else:
+            logger.info("Новых уведомлений не найдено.")
+
+        has_errors = sp_error or gost_error
+        if not has_errors:
+            logger.info("=== Проверка завершена успешно ===")
+            return 0
+        else:
+            logger.error("=== Проверка завершена с ошибками ===")
+            return 1
+    finally:
+        _release_update_lock(lock_file)
 
 
 if __name__ == "__main__":
