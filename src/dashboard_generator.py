@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from collections import Counter
 from datetime import datetime
@@ -22,6 +23,33 @@ from src.dashboard_config import (
 from src.excel_writer import read_polymer_gost_stats, _migrate_gost_add_comment_column, GOST_EXCEL_PATH
 
 logger = logging.getLogger(__name__)
+
+_DATE_RE_DMY = re.compile(r"^\s*(\d{2})\.(\d{2})\.(\d{2}|\d{4})")
+_DATE_RE_ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})")
+
+
+def _parse_date_parts(date_str: str) -> tuple[int, int, int] | None:
+    if not date_str:
+        return None
+    s = str(date_str).strip()
+    if not s:
+        return None
+    m = _DATE_RE_ISO.match(s)
+    if m:
+        try:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return y, mo, d
+        except ValueError:
+            return None
+    m = _DATE_RE_DMY.match(s)
+    if m:
+        try:
+            d, mo, y_raw = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            y = y_raw + 2000 if y_raw < 100 else y_raw
+            return y, mo, d
+        except ValueError:
+            return None
+    return None
 
 
 # ------------------------------------------------------------------
@@ -40,6 +68,22 @@ def _save_json(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_tk_config() -> tuple[dict | list, str]:
+    candidates = [
+        TK_CONFIG_PATH,
+        os.path.join(DATA_DIR, "my_technical_comettiees.json"),
+        os.path.join(DATA_DIR, "my_technical_comittees.json"),
+    ]
+    for p in candidates:
+        if not os.path.exists(p):
+            continue
+        try:
+            return _load_json(p), p
+        except json.JSONDecodeError as e:
+            logger.warning(f"Не удалось разобрать JSON {p}: {e}")
+    return {}, TK_CONFIG_PATH
 
 
 def update_registry(
@@ -109,12 +153,11 @@ def _compute_stats(registry: dict) -> dict:
     month_counter = Counter()
     for r in gost_list:
         date_str = r.get("start_date", "")
-        if date_str and len(date_str) >= 10:
-            # Формат: DD.MM.YYYY
-            parts = date_str.split(".")
-            if len(parts) == 3:
-                month_key = f"{parts[2]}-{parts[1]}"  # YYYY-MM
-                month_counter[month_key] += 1
+        parts = _parse_date_parts(date_str)
+        if parts:
+            y, mo, _d = parts
+            month_key = f"{y:04d}-{mo:02d}"
+            month_counter[month_key] += 1
 
     # Сортируем месяцы
     sorted_months = sorted(month_counter.keys())
@@ -170,21 +213,10 @@ def _compute_stats(registry: dict) -> dict:
 def _is_2026(date_str: str) -> bool:
     """Проверяет, относится ли дата к 2026 году.
 
-    Поддерживает форматы: DD.MM.YYYY, DD.MM.YY, YYYY-MM-DD.
+    Поддерживает форматы: DD.MM.YYYY, DD.MM.YY, YYYY-MM-DD, а также варианты с временем.
     """
-    if not date_str:
-        return False
-    s = date_str.strip()
-    # DD.MM.YYYY
-    if s.endswith(".2026"):
-        return True
-    # DD.MM.YY
-    if s.endswith(".26") and len(s) == 8:
-        return True
-    # YYYY-MM-DD
-    if s.startswith("2026-"):
-        return True
-    return False
+    parts = _parse_date_parts(date_str)
+    return bool(parts and parts[0] == 2026)
 
 
 def generate_dashboard() -> None:
@@ -211,8 +243,23 @@ def generate_dashboard() -> None:
         "sp": sp_2026,
     }
 
-    tk_config = _load_json(TK_CONFIG_PATH)
-    my_tks = tk_config.get("committees", [])
+    tk_config, tk_config_path_used = _load_tk_config()
+    if isinstance(tk_config, list):
+        my_tks_raw = tk_config
+    else:
+        my_tks_raw = (
+            tk_config.get("committees")
+            or tk_config.get("technical_committees")
+            or tk_config.get("tks")
+            or []
+        )
+    if isinstance(my_tks_raw, str):
+        my_tks_raw = [my_tks_raw]
+    my_tks = [str(x).strip() for x in my_tks_raw if str(x).strip()]
+    if not my_tks:
+        logger.warning(
+            f"Список «наших ТК» пуст. Проверьте файл: {tk_config_path_used}"
+        )
     stats = _compute_stats(filtered_registry)
 
     # Полимерная статистика из Excel
@@ -238,7 +285,14 @@ def generate_dashboard() -> None:
     }
     data_json = json.dumps(dashboard_data, ensure_ascii=False)
 
-    html = _build_html(data_json, stats, last_updated, my_tks, polymer_stats)
+    html = _build_html(
+        data_json,
+        stats,
+        last_updated,
+        my_tks,
+        tk_config_path_used,
+        polymer_stats,
+    )
 
     with open(DASHBOARD_OUTPUT_PATH, "w", encoding="utf-8") as f:
         f.write(html)
@@ -312,6 +366,7 @@ def _build_html(
     stats: dict,
     last_updated: str,
     my_tks: list[str],
+    tk_config_path: str,
     polymer_stats: dict | None = None,
 ) -> str:
     """Формирует полный HTML-документ дашборда."""
@@ -320,6 +375,7 @@ def _build_html(
     )
     stats_json = json.dumps(stats, ensure_ascii=False)
     my_tks_json = json.dumps(my_tks, ensure_ascii=False)
+    tk_config_path_json = json.dumps(tk_config_path, ensure_ascii=False)
     my_tks_display = ", ".join(my_tks) if my_tks else "Не настроено"
     if polymer_stats is None:
         polymer_stats = {"total": 0, "commented": 0}
@@ -580,6 +636,7 @@ def _build_html(
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
 <script>
 const MY_TKS = {my_tks_json};
+const TK_CONFIG_PATH = {tk_config_path_json};
 const STATS = {stats_json};
 const STATUS_COLORS = {status_colors};
 const POLYMER_STATS = {polymer_stats_json};
@@ -601,10 +658,41 @@ function fixCsvExportButtons(dtApi) {{
   }});
 }}
 
+function _normTkText(s) {{
+  return (s||'').toString().replace(/\\u00A0/g, ' ').trim();
+}}
+
+function _tkNumber(s) {{
+  const t = _normTkText(s).toUpperCase();
+  const m = t.match(/ТК\\s*0*(\\d+)/);
+  if (m) return parseInt(m[1], 10);
+  const d = t.match(/\\b0*(\\d{{1,4}})\\b/);
+  if (d) return parseInt(d[1], 10);
+  return null;
+}}
+
+const _MY_TK_NUMS = (MY_TKS||[]).map(_tkNumber).filter(v => v !== null);
+
 function isMyTk(tc) {{
   if (!MY_TKS.length) return false;
-  const tcL = (tc||'').toLowerCase();
-  return MY_TKS.some(tk => tcL.includes(tk.toLowerCase()));
+  const tcNum = _tkNumber(tc);
+  if (tcNum !== null && _MY_TK_NUMS.length) {{
+    return _MY_TK_NUMS.includes(tcNum);
+  }}
+  const tcL = _normTkText(tc).toLowerCase();
+  return MY_TKS.some(tk => tcL.includes(_normTkText(tk).toLowerCase()));
+}}
+
+function _dateSortKey(s) {{
+  const t = _normTkText(s);
+  if (!t) return '';
+  const iso = t.match(/^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})/);
+  if (iso) return iso[1] + iso[2] + iso[3];
+  const dmy = t.match(/^(\\d{{2}})\\.(\\d{{2}})\\.(\\d{{4}})/);
+  if (dmy) return dmy[3] + dmy[2] + dmy[1];
+  const dmy2 = t.match(/^(\\d{{2}})\\.(\\d{{2}})\\.(\\d{{2}})\\b/);
+  if (dmy2) return '20' + dmy2[3] + dmy2[2] + dmy2[1];
+  return t;
 }}
 
 function statusBadge(s) {{
@@ -638,11 +726,17 @@ $(document).ready(function() {{
       '<a href="'+row.url+'" target="_blank" class="project-link">'+d+'</a>' }},
     {{ data: 'technical_committee', render: d => {{
       const hl = isMyTk(d) ? ' <span class="badge text-white" style="font-size:0.65rem;background:#FC5A41;">наш ТК</span>' : '';
-      return d + hl;
+      return (d||'—') + hl;
     }} }},
     {{ data: 'developer' }},
-    {{ data: 'start_date', width:'90px' }},
-    {{ data: 'end_date', width:'90px' }},
+    {{ data: 'start_date', width:'90px', render: (d,type) => {{
+      if (type === 'sort' || type === 'type') return _dateSortKey(d);
+      return d || '—';
+    }} }},
+    {{ data: 'end_date', width:'90px', render: (d,type) => {{
+      if (type === 'sort' || type === 'type') return _dateSortKey(d);
+      return d || '—';
+    }} }},
     {{ data: 'status', render: d => statusBadge(d), width:'120px' }}
   ];
 
@@ -681,7 +775,10 @@ $(document).ready(function() {{
       return '<a href="'+row.url+'" target="_blank" class="project-link">'+name+'</a>';
     }} }},
     {{ data: 'developer', defaultContent:'—' }},
-    {{ data: 'placement_date', defaultContent:'—', render: d => d || '—', width:'90px' }}
+    {{ data: 'placement_date', defaultContent:'—', width:'90px', render: (d,type) => {{
+      if (type === 'sort' || type === 'type') return _dateSortKey(d);
+      return d || '—';
+    }} }}
   ];
 
   $('#spTable').DataTable({{
@@ -729,7 +826,7 @@ $(document).ready(function() {{
     }});
     $('#ourTkSummary').html(html);
   }} else {{
-    $('#ourTkSummary').html('<div class="alert alert-info">Добавьте ваши ТК в файл <code>data/my_technical_committees.json</code></div>');
+    $('#ourTkSummary').html('<div class="alert alert-info">Добавьте ваши ТК в файл <code>'+TK_CONFIG_PATH+'</code></div>');
   }}
 
   $('#ourTkTable').DataTable({{
@@ -768,9 +865,7 @@ $(document).ready(function() {{
       datasets: [{{
         label: 'Уведомлений',
         data: STATS.all_tk_values,
-        backgroundColor: STATS.all_tk_labels.map(tk =>
-          MY_TKS.some(t => tk.toLowerCase().includes(t.toLowerCase())) ? '#FC5A41' : '#008B92'
-        ),
+        backgroundColor: STATS.all_tk_labels.map(tk => isMyTk(tk) ? '#FC5A41' : '#008B92'),
         borderRadius: 4
       }}]
     }},
@@ -906,7 +1001,7 @@ $(document).ready(function() {{
     const ctx = document.getElementById('ourTkChart');
     ctx.parentElement.innerHTML = '<div class="alert alert-info mt-4 text-center">'
       + '<strong>ТК не настроены</strong><br>'
-      + 'Добавьте ваши ТК в файл <code>data/my_technical_committees.json</code><br>'
+      + 'Добавьте ваши ТК в файл <code>'+TK_CONFIG_PATH+'</code><br>'
       + 'чтобы видеть статистику по интересующим комитетам.'
       + '</div>';
     document.getElementById('ourTkBreakdownChart').parentElement.style.display = 'none';
