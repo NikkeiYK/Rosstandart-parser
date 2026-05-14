@@ -28,8 +28,6 @@ DASHBOARD_REGISTRY_PATH = os.path.join(DATA_DIR, "dashboard_registry.json")
 # Конфигурация «наших» технических комитетов
 TK_CONFIG_PATH = os.path.join(DATA_DIR, "my_technical_committees.json")
 
-# HTML дашборда (в том же DATA_DIR, чтобы Web и Cron видели один файл при общем томе)
-DASHBOARD_OUTPUT_PATH = os.path.join(DATA_DIR, "dashboard.html")
 
 # Начало периода для загрузки данных
 YEAR_START = "01.01.2026"

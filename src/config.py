@@ -6,16 +6,6 @@ from src.dashboard_config import DATA_DIR
 BASE_URL = "https://www.rst.gov.ru/portal/gost/home/activity/standardization/notification/notificationssetrules"
 COMPONENT_ID = "5bb1aa96-ad4f-4e66-afe1-a7d403577940"
 
-# Email (список получателей)
-RECIPIENT_EMAILS = [
-    "uvedomleniyassayta@gmail.com",
-    "ntr.polylab@sibur.ru",
-]
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-
 # Файл для хранения уже обработанных уведомлений
 LAST_SEEN_PATH = os.path.join(DATA_DIR, "last_seen.json")
 
