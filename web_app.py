@@ -91,15 +91,22 @@ def _parse_date_for_sorting(date_str: str) -> datetime | None:
             continue
     return None
 
+  
 def _format_moscow_time(dt: datetime | None = None) -> str:
-    """Форматирует время в московском часовом поясе."""
-    if dt is None:
-        dt = datetime.now(ZoneInfo("Europe/Moscow"))
-    elif dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo("Europe/Moscow"))
-    else:
-        dt = dt.astimezone(ZoneInfo("Europe/Moscow"))
-    return dt.strftime("%d.%m.%Y %H:%M")
+  """Форматирует время в московском часовом поясе."""
+  from datetime import timezone
+  
+  if dt is None:
+      # Текущее время по Москве
+      dt = datetime.now(ZoneInfo("Europe/Moscow"))
+  elif dt.tzinfo is None:
+      # ⚠️ Если время без пояса — считаем что это UTC, затем конвертируем в Москву
+      dt = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Moscow"))
+  else:
+      # Если есть любой другой пояс — конвертируем в Москву
+      dt = dt.astimezone(ZoneInfo("Europe/Moscow"))
+  
+  return dt.strftime("%d.%m.%Y %H:%M") 
 
 def _load_committees() -> list[str]:
     """Загружает список технических комитетов из конфигурационного файла."""
