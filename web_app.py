@@ -93,21 +93,26 @@ def _parse_date_for_sorting(date_str: str) -> datetime | None:
 
   
 def _format_moscow_time(dt: datetime | None = None) -> str:
-    """Форматирует время по Москве (UTC+3) без зависимости от tzdata."""
-    from datetime import timedelta, timezone
-    
-    # Московское время = UTC+3 (фиксированное смещение)
-    moscow_offset = timezone(timedelta(hours=3))
+    """Форматирует время по Москве: если время наивное — считаем что это UTC и добавляем +3 часа."""
+    from datetime import timedelta
     
     if dt is None:
-        # Текущее время: берём UTC и добавляем +3 часа
-        dt = datetime.now(timezone.utc).astimezone(moscow_offset)
-    elif dt.tzinfo is None:
-        # Наивное время: считаем что это было UTC, конвертируем в Москву
-        dt = dt.replace(tzinfo=timezone.utc).astimezone(moscow_offset)
+        dt = datetime.now()
+    
+    # Если время без часового пояса (наивное) — считаем что это было сохранено в UTC
+    # и добавляем 3 часа для отображения в Москве
+    if dt.tzinfo is None:
+        dt = dt + timedelta(hours=3)
     else:
-        # Любое другое время с поясом: конвертируем в Москву
-        dt = dt.astimezone(moscow_offset)
+        # Если есть пояс — конвертируем в Москву
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.astimezone(ZoneInfo("Europe/Moscow"))
+        except:
+            # Фоллбэк: если время в UTC, добавляем 3 часа
+            from datetime import timezone
+            if dt.tzinfo == timezone.utc:
+                dt = dt + timedelta(hours=3)
     
     return dt.strftime("%d.%m.%Y %H:%M")
 
@@ -212,11 +217,15 @@ def _prepare_dashboard_data() -> dict:
     polymer_commented = 0
     
     updated = raw.get("metadata", {}).get("last_updated", "")
+    print(f"🕐 RAW last_updated из JSON: {updated}")
     if updated:
         try:
             dt = datetime.fromisoformat(updated)
+            print(f"🕐 После fromisoformat: {dt}, tzinfo={dt.tzinfo}")
             updated = _format_moscow_time(dt)
-        except: 
+            print(f"🕐 После _format_moscow_time: {updated}")
+        except Exception as e: 
+            print(f"🕐 Ошибка при обработке времени: {e}")
             updated = _format_moscow_time()
     else:
         updated = _format_moscow_time()

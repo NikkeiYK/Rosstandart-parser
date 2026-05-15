@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -127,7 +127,7 @@ def update_registry(gost_list: list, sp_list: list) -> None:
             registry["sp"].append({**n, "fetched_date": today, "source": "sp"})
             existing_sp.add(n["id"])
 
-    registry["metadata"]["last_updated"] = datetime.now().isoformat()
+    registry["metadata"]["last_updated"] = datetime.now(timezone.utc).isoformat()
     registry["metadata"]["gost_count"] = len(registry["gost"])
     registry["metadata"]["sp_count"] = len(registry["sp"])
 
